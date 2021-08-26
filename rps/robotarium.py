@@ -91,6 +91,14 @@ class Robotarium(RobotariumABC):
                         t=time.time()
                     self.previous_render_time = t
 
+                fov = 60
+                self.fov_patches[0].set_center(self.poses[:2, 0])
+                self.fov_patches[0].set_radius(abs(self.velocities[0,0]*20))
+                self.fov_patches[0].set_theta1(self.poses[2, 0]/math.pi*180 - fov/2)
+                self.fov_patches[0].set_theta2(self.poses[2, 0]/math.pi*180 + fov/2)
+                self.fov_patches[0].set_width(self.fov_patches[0].r)
+                self.axes.add_patch(self.fov_patches[0])
+
                 for i in range(self.number_of_robots):
                     self.chassis_patches[i].center = self.poses[:2, i]
                     self.chassis_patches[i].orientation = self.poses[2, i] + math.pi/4

@@ -66,16 +66,24 @@ class RobotariumABC(ABC):
         self.left_led_patches = []
         self.right_led_patches = []
         self.chassis_patches = []
+        self.fov_patches = []
         self.right_wheel_patches = []
         self.left_wheel_patches = []
 
         if(self.show_figure):
             self.figure, self.axes = plt.subplots()
             self.axes.set_axis_off()
+            
+            p_fov = patches.Wedge(self.poses[:2, 0], 0.3, self.poses[2, 0]/math.pi*180-30, self.poses[2, 0]/math.pi*180+30, fill=False)
+            self.fov_patches.append(p_fov)
+            self.axes.add_patch(p_fov)
+            
             for i in range(number_of_robots):
                 if i==0:
                     p = patches.RegularPolygon(self.poses[:2, i], 4, math.sqrt(2)*self.robot_radius, self.poses[2,i]+math.pi/4, facecolor='#FFD700', edgecolor = 'k')
-                if i>=1:
+                elif i==1:
+                    p = patches.RegularPolygon(self.poses[:2, i], 4, math.sqrt(2)*self.robot_radius, self.poses[2,i]+math.pi/4, facecolor='#00FF00', edgecolor = 'k')
+                else:
                     p = patches.RegularPolygon(self.poses[:2, i], 4, math.sqrt(2)*self.robot_radius, self.poses[2,i]+math.pi/4, facecolor='#0028ff', edgecolor = 'k')
 
                 rled = patches.Circle(self.poses[:2, i]+0.75*self.robot_radius*np.array((np.cos(self.poses[2, i]), np.sin(self.poses[2, i]))+\

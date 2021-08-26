@@ -37,19 +37,25 @@ class CLF_CBF_NMPC():
         gamma_k         : (1-\\gamma_k) is the exponential decreasing rate of a CBF at time step k
         alpha_k         : (1-\\alpha_k) is the exponential decreasing rate of a CLF at time step k
         step            : discretization time step in seconds 
+        Q               : cost weights Q in QP
+        R               : cost weights R in QP
+        W_slack         : cost weights W in QP
         goal_global     : goal state in global coordinates
+        obj_state_global: state of the recognized object in global coordinates
         
         opti            : CasADi's Opti stack
         opt_x0_global   : initial state in global coordinates
-        opt_x0_local   : initial state in global coordinates
+        opt_x0_local    : initial state in global coordinates
         opt_states      : optimized states/trajectory
         opt_controls    : optimized control variables
         opt_trj         : optimized trajectory (in global coordinates)
-        opt_d_slack     : a slack variable resolving infeasibility between CLF and CBF
+        opt_clf_slack   : a slack variable resolving infeasibility between CLF and safety CBF
+        opt_fov_slack   : a slack variable resolving infeasibility that might be caused by FoV CBF
         opt_cost        : 
 
 
         goal_local      : goal state in local coordinates
+        obj_state_local : state of the recognized object in local coordinates
         v_max           : Maximum linear velocity
         omega_max       : Maximum angular velocity
     """
@@ -57,9 +63,11 @@ class CLF_CBF_NMPC():
     ## parameters for optimization
     step = 0.1
     N = 12 
-    M_CBF = 6 
+    M_CBF = N/2
+    M_FOV = N-2 
     M_CLF = 1 
-    gamma_k = 0.1 
+    gamma_k = 0.2 
+    gamma_fov = 0.1 
     alpha_k = 0.01 
     opti = ca.Opti()
 
@@ -67,18 +75,23 @@ class CLF_CBF_NMPC():
     opt_x0_local = opti.parameter()
     opt_controls = opti.variable(N)
     opt_states = opti.variable(N+1)
-    opt_d_slack = opti.variable(N)
+    opt_clf_slack = opti.variable(N)
     opt_cost = 0
 
     v_max = 0.5
     omega_max = 1.5
 
-    def __init__(self, n, stp, m_cbf, m_clf, gamma, alpha, dim_x = 3, dim_u = 2):
-        self.N = n
+    def __init__(self, mpc_horzn, stp, Q, R, W, m_cbf, m_fov, m_clf, gamma_k, gamma_fov, alpha, dim_x = 3, dim_u = 2):
+        self.N = mpc_horzn
         self.step = stp
-        self.M_CBF = m_cbf
-        self.M_CLF = m_clf
-        self.gamma_k = gamma
+        self.Q = Q
+        self.R = R
+        self.W_slack = W
+        self.M_CBF = min(mpc_horzn, m_cbf)
+        self.M_FOV = min(mpc_horzn, m_fov)
+        self.M_CLF = min(mpc_horzn, m_clf)
+        self.gamma_k = gamma_k
+        self.gamma_fov = gamma_fov
         self.alpha_k = alpha
         self.opti = ca.Opti()
 
@@ -92,13 +105,17 @@ class CLF_CBF_NMPC():
         # control variables: linear velocity v and angle velocity omega
         self.opt_controls = self.opti.variable(self.N, dim_u)
         # a slack variable to avoid infeasibility between CLF and CBF constraints
-        self.opt_d_slack = self.opti.variable(self.N, 1)
+        self.opt_clf_slack = self.opti.variable(self.N, 1)
+        # a slack variable to avoid infeasibility between CLF and CBF constraints
+        self.opt_fov_slack = self.opti.variable(self.N, 1)
         
         # initial state
         self.opt_x0_local = self.opti.parameter(dim_x)
         self.opt_x0_global = self.opti.parameter(dim_x)
         self.goal_global = self.opti.parameter(dim_x)
         self.goal_local = self.opti.parameter(dim_x)
+        self.obj_state_global = self.opti.parameter(dim_x)
+        self.obj_state_local = self.opti.parameter(dim_x)
         
         # set up cost function
         self.__set_cost_func()
@@ -112,9 +129,7 @@ class CLF_CBF_NMPC():
 
     def set_goal(self, goal_state):
         """
-        Set goal states (in globla coordinates)
-
-        Turn a vector into a matrix. 
+        Set goal states (in globla coordinates) 
 
         Args:
             goal_global:        : vector/list
@@ -125,18 +140,34 @@ class CLF_CBF_NMPC():
         self.opti.set_value(self.goal_global, goal_state)
         self.opti.set_value(self.goal_local, goal_state)
 
+    def __set_obj_st(self, obj_state):
+        """
+        Set object states (in globla coordinates)
+
+        Args:
+            obj_state_global:        : vector/list
+        
+        Returns:
+            None.
+        """
+        self.opti.set_value(self.obj_state_global, obj_state)
+        self.opti.set_value(self.obj_state_local, obj_state)
+
     def __set_cost_func(self):
-        # quadratic cost  : J = (x-goal)^T * Q * (x-goal)  +  u^T * R * u  + W_slack * opt_d_slack 
+        # quadratic cost  : J = (x-goal)^T * Q * (x-goal)  +  u^T * R * u  + W_slack * opt_clf_slack 
         # Q               : Weights for state variables in a (quadratic) cost function 
         # R               : Weights for control input variables in a (quadratic) cost function
-        Q = np.array([[5, 0.0, 0.0],[0.0, 5, 0.0],[0.0, 0.0, 0.01]])
-        R = np.array([[0.1, 0.0], [0.0, 0.0001]])
-        W_slack = np.array([[100]])
+        Q = self.Q
+        R = self.R
+        W_slack = self.W_slack
         for i in range(self.N):
-            # self.opt_cost = self.opt_cost + ca.mtimes([self.opt_controls[i, :], R, self.opt_controls[i, :].T]) + ca.mtimes([self.opt_d_slack[i, :], W_slack, self.opt_d_slack[i, :].T])
-            self.opt_cost = self.opt_cost + ca.mtimes([self.opt_controls[i, :], R, self.opt_controls[i, :].T])  + ca.mtimes([(self.opt_states[i, :] - self.goal_local.T), Q, (self.opt_states[i, :]- self.goal_local.T).T]) + ca.mtimes([self.opt_d_slack[i, :], W_slack, self.opt_d_slack[i, :].T])
+            # self.opt_cost = self.opt_cost + ca.mtimes([self.opt_controls[i, :], R, self.opt_controls[i, :].T]) + ca.mtimes([self.opt_clf_slack[i, :], W_slack, self.opt_clf_slack[i, :].T])
+            self.opt_cost = self.opt_cost + ca.mtimes([self.opt_controls[i, :], R, self.opt_controls[i, :].T])  
+            self.opt_cost += ca.mtimes([(self.opt_states[i, :] - self.goal_local.T), Q, (self.opt_states[i, :]- self.goal_local.T).T]) 
+            slck = ca.horzcat(*[self.opt_fov_slack[i, :], self.opt_clf_slack[i,:] ])
+            self.opt_cost += ca.mtimes([slck, W_slack, slck.T])
         # final term 
-        # self.opt_cost = self.opt_cost + ca.mtimes([(self.opt_states[self.N-1, :] - self.goal_local.T), Q, (self.opt_states[self.N-1, :]- self.goal_local.T).T])
+        # self.opt_cost += ca.mtimes([(self.opt_states[self.N-1, :] - self.goal_local.T), Q, (self.opt_states[self.N-1, :]- self.goal_local.T).T])
 
 
     def __global2local(self):
@@ -155,6 +186,8 @@ class CLF_CBF_NMPC():
         # self.opti.set_value(self.opt_x0_local, self.opti.value(self.opt_x0_global) - init_st)
         self.goal_local[0] = self.goal_global[0] -init_st[0]
         self.goal_local[1] = self.goal_global[1] -init_st[1]
+        self.obj_state_local[0] = self.obj_state_global[0] -init_st[0]
+        self.obj_state_local[1] = self.obj_state_global[1] -init_st[1]
         self.opt_x0_local[0] = self.opt_x0_global[0] -init_st[0]
         self.opt_x0_local[1] = self.opt_x0_global[1] -init_st[1]
         # time k
@@ -163,7 +196,6 @@ class CLF_CBF_NMPC():
             for obs_i in t_k:
                 obs_i[0] -= init_st[0]
                 obs_i[1] -= init_st[1]
-                
 
         # print('Goal_global:')
         # print(self.opti.value(self.goal_global))
@@ -198,8 +230,7 @@ class CLF_CBF_NMPC():
         f = lambda x_, u_: ca.vertcat(*[u_[0]*ca.cos(x_[2]), u_[0]*ca.sin(x_[2]), u_[1]])
         
         # initial condition constraint
-        self.opti.subject_to(self.opt_states[0, :] == self.opt_x0_local.T)  # In local, x0 == [vec(0), theta]
-        # self.opti.subject_to(self.opt_states[0, :] == self.opt_x0.T)
+        self.opti.subject_to(self.opt_states[0, :] == self.opt_x0_local.T) 
 
         # Dynamics constraints
         for i in range(self.N):
@@ -208,7 +239,7 @@ class CLF_CBF_NMPC():
 
     def __add_safe_constrnts(self):
         # safe distance
-        safe_dist = 0.24
+        safe_dist = 0.25
         # control barrier function for safety
         h = lambda x_,y_: (x_[0] - y_[0]) ** 2 + (x_[1] - y_[1]) ** 2 - safe_dist**2
         
@@ -221,35 +252,34 @@ class CLF_CBF_NMPC():
 
     def __add_stability_constrnts(self):
         # control Lyapunov function 
-        V = lambda x_: (x_[0] - self.goal_local[0]) ** 2 + (x_[1] - self.goal_local[1]) ** 2 
+        V = lambda x_: (x_[0] - self.goal_local[0]) ** 2 + (x_[1] - self.goal_local[1]) ** 2 #+ 0.5*(x_[2] - self.goal_local[2]) ** 2
         # add CLF constraints
         for i in range(self.M_CLF):
-            self.opti.subject_to(V(self.opt_states[i+1, :]) <= (1-self.alpha_k)*V(self.opt_states[i, :]) + self.opt_d_slack[i, :])
+            self.opti.subject_to(V(self.opt_states[i+1, :]) <= (1-self.alpha_k)*V(self.opt_states[i, :]) + self.opt_clf_slack[i, :])
         pass
 
     def __add_fov_constrnts(self):
         # Field of Vision constraints to make an effort to maintain visual contact 
         # But it's a soft constraint, relaxed by a slack variable 
         
-        half_fov = 0.5* (np.pi* 1/2)    # 120 degrees of FoV
-        agl = np.cos(half_fov)
+        half_fov = 0.5* ( 50 *np.pi/180 )    # 50 degrees of FoV
+        agl_cos = np.cos(half_fov)
         # control barrier function for FoV 
-        h = lambda ori_, obj_: (ori_[0]*obj_[0]+ori_[1]*obj_[1])/ca.sqrt((obj_[0]**2+obj_[1]**2)) -np.cos(agl) 
-        for i in range(self.M_CBF):
+        h = lambda ori_, obj_: (ori_[0]*obj_[0]+ori_[1]*obj_[1])/ca.sqrt((obj_[0]**2+obj_[1]**2)) -agl_cos
+        for i in range(self.M_FOV):
             ori_i = [ca.cos(self.opt_states[i, 2]), ca.sin(self.opt_states[i, 2])]
-            obj_i = [self.goal_local[0]-self.opt_states[i, 0], self.goal_local[1]-self.opt_states[i, 1]]
+            obj_i = [self.obj_state_local[0]-self.opt_states[i, 0], self.obj_state_local[1]-self.opt_states[i, 1]]
             ori_ip1 = [ca.cos(self.opt_states[i+1, 2]), ca.sin(self.opt_states[i+1, 2])]
-            obj_ip1 = [self.goal_local[0]-self.opt_states[i+1, 0], self.goal_local[1]-self.opt_states[i+1, 1]]
-            # ori = [ca.cos(st_i[2]), ca.sin(st_i[2])]
-            # obj = [self.goal_local[0]-st_i[0], self.goal_local[1]-st_i[1]]
-            # self.opti.subject_to( h(ori_ip1, obj_ip1) >= (1-self.gamma_k)*h(ori_i, obj_i)  ) # +self.opt_d_slack[i, :]
-            self.opti.subject_to( h(ori_i, obj_i) > 0) # +self.opt_d_slack[i, :]
+            obj_ip1 = [self.obj_state_local[0]-self.opt_states[i+1, 0], self.obj_state_local[1]-self.opt_states[i+1, 1]]
+            # add FoV-CBF constraints
+            self.opti.subject_to( h(ori_ip1, obj_ip1) >= (1-self.gamma_k)*h(ori_i, obj_i) +self.opt_fov_slack[i, :] ) # 
+            # self.opti.subject_to( h(ori_i, obj_i) >= 0) # +self.opt_fov_slack[i, :]
 
 
-    def __adopt_d_slack_constrnts(self):
+    def __adopt_clf_slack_constrnts(self):
         pass
 
-    def solve(self, init_st, goal_st, others_states):
+    def solve(self, init_st, goal_st, obj_states, others_states):
         """
         Solving the CLF-CBF-NMPC optimization. 
 
@@ -275,13 +305,16 @@ class CLF_CBF_NMPC():
         self.opti.set_value(self.opt_x0_local, init_st)
         # set goal states
         self.set_goal(goal_st)
+        # set object state
+        self.__set_obj_st(obj_states)
 
         # obstacles or other agents
         self.obstacles = others_states.copy()
         # only care about obstacles within an ROI 
+        r_roi = 1
         l = []
         for i in range(self.obstacles.shape[1]):
-            if((self.obstacles[0][i][0] - init_st[0])** 2 + (self.obstacles[0][i][1] - init_st[1])** 2 > 1):
+            if((self.obstacles[0][i][0] - init_st[0])** 2 + (self.obstacles[0][i][1] - init_st[1])** 2 > r_roi**2):
                 l.append(i)
         # delete those out of the ROI
         self.obstacles = np.delete(self.obstacles, l, axis=1)
@@ -301,9 +334,8 @@ class CLF_CBF_NMPC():
 
         # Optimizer configures
         self.opti.minimize(self.opt_cost)
-        opts_setting = {'ipopt.max_iter':200, 'ipopt.print_level':1, 'print_time':0, 'ipopt.acceptable_tol':1e-5, 'ipopt.acceptable_obj_change_tol':1e-5}
+        opts_setting = {'ipopt.max_iter':300, 'ipopt.print_level':1, 'print_time':0, 'ipopt.acceptable_tol':1e-5, 'ipopt.acceptable_obj_change_tol':1e-5}
         self.opti.solver('ipopt', opts_setting)
-        # self.opti.solver('ipopt')
         # self.solution = self.opti.solve()
         
 
@@ -312,18 +344,19 @@ class CLF_CBF_NMPC():
             self.solution = self.opti.solve()
             local_states_sol = self.opti.value(self.opt_states)
             controls_sol = self.opti.value(self.opt_controls)
-            # d_slck_sol = self.opti.value(self.opt_d_slack)
+            slck_sol = np.array([self.opti.value(self.opt_fov_slack[0]), self.opti.value(self.opt_clf_slack[0])])
             self.__local2global()
             global_states_sol = self.opt_trj
-        except:
+        except Exception as err:
             print('Something went wrong!!')
+            print(repr(err))
             local_states_sol = self.opti.debug.value(self.opt_states)
             controls_sol = self.opti.debug.value(self.opt_controls)
-            # d_slck_sol = self.opti.debug.value(self.opt_d_slack)
+            slck_sol = np.array([self.opti.debug.value(self.opt_fov_slack[0]), self.opti.debug.value(self.opt_clf_slack[0])])
             self.__local2global()
             global_states_sol = self.opt_trj
 
-        return global_states_sol, controls_sol, local_states_sol #, d_slck_sol,
+        return global_states_sol, controls_sol, local_states_sol , slck_sol
         # return self.solution
     
     def get_optimized_u(self):
