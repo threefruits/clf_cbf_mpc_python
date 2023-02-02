@@ -1,7 +1,5 @@
 # CLF_CBF_NMPC_python
-
-An unofficial python implement of nonlinear model predictive control with control Lyapunov functions and control barrier functions (CLF-CBF-NMPC).
-(Details are in [https://arxiv.org/abs/2105.10596](https://arxiv.org/abs/2105.10596))  
+nonlinear model predictive control with control Lyapunov functions and control barrier functions (CLF-CBF-NMPC).
 
 ## Simulation Environment
 The test code `test.py` is based on the simulation environment [Robotarium (https://github.com/robotarium/robotarium_python_simulator)](https://github.com/robotarium/robotarium_python_simulator).
